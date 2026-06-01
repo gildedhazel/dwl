@@ -144,6 +144,7 @@ typedef struct {
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen, was_tiled;
 	uint32_t resize; /* configure serial of a pending resize */
+	struct wl_list link_temp;
 	struct wlr_box old_geom;
 } Client;
 
@@ -256,6 +257,7 @@ typedef struct {
 } SessionLock;
 
 /* function declarations */
+static void addscratchpad(const Arg *arg);
 static void applybounds(Client *c, struct wlr_box *bbox);
 static void applyrules(Client *c);
 static void arrange(Monitor *m);
@@ -342,6 +344,7 @@ static void printstatus(void);
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
 static void rendermon(struct wl_listener *listener, void *data);
+static void removescratchpad(const Arg *arg);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
@@ -355,6 +358,7 @@ static void setlayout(const Arg *arg);
 static void setmfact(const Arg *arg);
 static void setmon(Client *c, Monitor *m, uint32_t newtags);
 static void setpsel(struct wl_listener *listener, void *data);
+static void setscratchpad(const Arg *arg);
 static void setsel(struct wl_listener *listener, void *data);
 static void setup(void);
 static void setratio_h(const Arg *arg);
@@ -368,6 +372,7 @@ static void tile(Monitor *m);
 static void togglebar(const Arg *arg);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
+static void togglescratchpad(const Arg *arg);
 static void togglegaps(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
@@ -500,6 +505,11 @@ struct Pertag {
 	unsigned int sellts[TAGCOUNT + 1]; /* selected layouts */
 	const Layout *ltidxs[TAGCOUNT + 1][2]; /* matrix of tags and layouts indexes  */
 };
+
+static struct wl_list scratchpad_clients[SCRATCHPAD_COUNT];
+static int scratchpad_visible[SCRATCHPAD_COUNT];
+static int scratchpad_sel = 0;
+#include "simple_scratchpad.c"
 
 /* function implementations */
 void
@@ -1412,7 +1422,7 @@ void
 destroynotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the xdg_toplevel is destroyed. */
-	Client *c = wl_container_of(listener, c, destroy);
+	Client *sc, *c = wl_container_of(listener, c, destroy);
 	Monitor *mon;
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
@@ -1424,6 +1434,17 @@ destroynotify(struct wl_listener *listener, void *data)
 			remove_client(mon, c);
 		}
 	}
+	/* Check if destroyed client was part of any scratchpad slot
+	 * and clean it from the list if so. */
+	for (int i = 0; i < SCRATCHPAD_COUNT; i++) {
+		wl_list_for_each(sc, &scratchpad_clients[i], link_temp) {
+			if (sc == c) {
+				wl_list_remove(&c->link_temp);
+				goto scratchpad_destroy_done;
+			}
+		}
+	}
+scratchpad_destroy_done:;
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -2658,11 +2679,24 @@ setcursorshape(struct wl_listener *listener, void *data)
 void
 setfloating(Client *c, int floating)
 {
-	Client *p = client_get_parent(c);
+	Client *sc, *p = client_get_parent(c);
 	c->isfloating = floating;
 	/* If in floating layout do not change the client's layer */
 	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
 		return;
+	/* Check if unfloated client was part of any scratchpad slot
+	 * and remove it from that slot if so */
+	if (!floating) {
+		for (int i = 0; i < SCRATCHPAD_COUNT; i++) {
+			wl_list_for_each(sc, &scratchpad_clients[i], link_temp) {
+				if (sc == c) {
+					wl_list_remove(&c->link_temp);
+					goto scratchpad_float_done;
+				}
+			}
+		}
+scratchpad_float_done:;
+	}
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
 			(p && p->isfullscreen) ? LyrFS
 			: c->isfloating ? LyrFloat : LyrTile]);
@@ -2882,6 +2916,11 @@ setup(void)
 	 */
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
+	wl_list_init(&fstack);
+	for (int j = 0; j < SCRATCHPAD_COUNT; j++) {
+		wl_list_init(&scratchpad_clients[j]);
+		scratchpad_visible[j] = 1;
+	}
 
 	xdg_shell = wlr_xdg_shell_create(dpy, 6);
 	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);

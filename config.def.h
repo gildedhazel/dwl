@@ -27,6 +27,8 @@ enum {
 } RotateTags;
 
 enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
+
+#define SCRATCHPAD_COUNT 3
 /* tagging - TAGCOUNT must be no greater than 31 */
 #define TAGCOUNT (9)
 
@@ -152,6 +154,9 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_Tab,         view,             {0} },
 	{ MODKEY,                    XKB_KEY_g,          togglegaps,     {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_c,           killclient,       {0} },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_z,           addscratchpad,    {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_z,           togglescratchpad, {0} },
+	{ MODKEY,                    XKB_KEY_z,           removescratchpad, {0} },
 	{ MODKEY,                    XKB_KEY_t,           setlayout,        {.v = &layouts[0]} },
 	{ MODKEY,                    XKB_KEY_f,           setlayout,        {.v = &layouts[1]} },
 	{ MODKEY,                    XKB_KEY_m,           setlayout,        {.v = &layouts[2]} },
@@ -164,6 +169,9 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_period,      focusmon,         {.i = WLR_DIRECTION_RIGHT} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_less,        tagmon,           {.i = WLR_DIRECTION_LEFT} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_greater,     tagmon,           {.i = WLR_DIRECTION_RIGHT} },
+	{ MODKEY|WLR_MODIFIER_LOGO,  XKB_KEY_1,           setscratchpad,    {.i = 0} },
+	{ MODKEY|WLR_MODIFIER_LOGO,  XKB_KEY_2,           setscratchpad,    {.i = 1} },
+	{ MODKEY|WLR_MODIFIER_LOGO,  XKB_KEY_3,           setscratchpad,    {.i = 2} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         swapclients,       {.i = DIR_UP} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       swapclients,       {.i = DIR_DOWN} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      swapclients,       {.i = DIR_RIGHT} },
