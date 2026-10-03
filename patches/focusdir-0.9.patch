@@ -1,7 +1,7 @@
-From a0e71a687b7fcaebdaf1da80c09bf5563bff46b1 Mon Sep 17 00:00:00 2001
-From: ldev <ldev@ldev.eu.org>
-Date: Mon, 12 Feb 2024 21:50:24 +0100
-Subject: [PATCH] focusdir
+From 2b10cf7ae87f119627260ec5a17147593697b734 Mon Sep 17 00:00:00 2001
+From: pi66 <pixel2176@proton.me>
+Date: Tue, 29 Sep 2026 12:15:43 +0100
+Subject: [PATCH] focusdir: update for dwl v0.9 and wlroots-next-4fd683c
 
 ---
  config.def.h |  4 ++++
@@ -9,22 +9,22 @@ Subject: [PATCH] focusdir
  2 files changed, 49 insertions(+)
 
 diff --git a/config.def.h b/config.def.h
-index 9009517..2a1a82e 100644
+index 13c5322..d81f9cd 100644
 --- a/config.def.h
 +++ b/config.def.h
-@@ -124,6 +124,10 @@ static const Key keys[] = {
- 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,     spawn,          {.v = termcmd} },
- 	{ MODKEY,                    XKB_KEY_j,          focusstack,     {.i = +1} },
- 	{ MODKEY,                    XKB_KEY_k,          focusstack,     {.i = -1} },
-+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_h,          focusdir,       {.ui = 0} },
-+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_l,          focusdir,       {.ui = 1} },
-+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_k,          focusdir,       {.ui = 2} },
-+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_j,          focusdir,       {.ui = 3} },
- 	{ MODKEY,                    XKB_KEY_i,          incnmaster,     {.i = +1} },
- 	{ MODKEY,                    XKB_KEY_d,          incnmaster,     {.i = -1} },
- 	{ MODKEY,                    XKB_KEY_h,          setmfact,       {.f = -0.05f} },
+@@ -125,6 +125,10 @@ static const Key keys[] = {
+ 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,      spawn,            {.v = termcmd} },
+ 	{ MODKEY,                    XKB_KEY_j,           focusstack,       {.i = +1} },
+ 	{ MODKEY,                    XKB_KEY_k,           focusstack,       {.i = -1} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_h,           focusdir,         {.ui = 0} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_l,           focusdir,         {.ui = 1} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_k,           focusdir,         {.ui = 2} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_j,           focusdir,         {.ui = 3} },
+ 	{ MODKEY,                    XKB_KEY_i,           incnmaster,       {.i = +1} },
+ 	{ MODKEY,                    XKB_KEY_d,           incnmaster,       {.i = -1} },
+ 	{ MODKEY,                    XKB_KEY_h,           setmfact,         {.f = -0.05f} },
 diff --git a/dwl.c b/dwl.c
-index bf02a6d..64d5de7 100644
+index 4cfd0fd..acab367 100644
 --- a/dwl.c
 +++ b/dwl.c
 @@ -1,6 +1,7 @@
@@ -34,29 +34,30 @@ index bf02a6d..64d5de7 100644
 +#include <limits.h>
  #include <getopt.h>
  #include <libinput.h>
- #include <linux/input-event-codes.h>
-@@ -268,6 +269,7 @@ static Monitor *dirtomon(enum wlr_direction dir);
+ #include <limits.h>
+@@ -306,6 +307,7 @@ static Monitor *dirtomon(enum wlr_direction dir);
  static void focusclient(Client *c, int lift);
  static void focusmon(const Arg *arg);
  static void focusstack(const Arg *arg);
 +static void focusdir(const Arg *arg);
  static Client *focustop(Monitor *m);
  static void fullscreennotify(struct wl_listener *listener, void *data);
- static void handlesig(int signo);
-@@ -1271,6 +1273,49 @@ focusstack(const Arg *arg)
+ static void gpureset(struct wl_listener *listener, void *data);
+@@ -1624,6 +1626,49 @@ focusstack(const Arg *arg)
  	focusclient(c, 1);
  }
  
 +void focusdir(const Arg *arg)
 +{
 +	/* Focus the left, right, up, down client relative to the current focused client on selmon */
-+  Client *c, *sel = focustop(selmon);
-+	if (!sel || sel->isfullscreen)
-+		return;
-+
 +  int dist=INT_MAX;
++  Client *c, *sel = focustop(selmon);
 +  Client *newsel = NULL;
 +  int newdist=INT_MAX;
++
++  if (!sel || sel->isfullscreen)
++	  return;
++
 +  wl_list_for_each(c, &clients, link) {
 +    if (!VISIBLEON(c, selmon))
 +      continue; /* skip non visible windows */
@@ -89,10 +90,9 @@ index bf02a6d..64d5de7 100644
 +  }
 +}
 +
-+
- /* We probably should change the name of this, it sounds like
+ /* We probably should change the name of this: it sounds like it
   * will focus the topmost client of this mon, when actually will
   * only return that client */
 -- 
-2.43.0
+2.55.0
 

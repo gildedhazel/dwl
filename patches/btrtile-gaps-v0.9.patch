@@ -1,0 +1,1237 @@
+From 3703c920073a98d48c386465f86d8b9168ab8121 Mon Sep 17 00:00:00 2001
+From: julmajustus <julmajustus@tutanota.com>
+Date: Mon, 21 Sep 2026 21:23:37 +0300
+Subject: [PATCH] btrtile: update for v0.9
+
+---
+ Makefile     |   3 +-
+ btrtile.h    | 884 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ config.def.h |  21 +-
+ dwl.c        | 149 +++++++--
+ 4 files changed, 1020 insertions(+), 37 deletions(-)
+ create mode 100644 btrtile.h
+
+diff --git a/Makefile b/Makefile
+index 8304245..063ba0a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -20,7 +20,8 @@ all: dwl
+ dwl: dwl.c client.h config.h ime.h util.h config.mk cursor-shape-v1-protocol.h \
+ 	ext-image-copy-capture-v1-protocol.h \
+ 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
+-	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h
++	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
++	btrtile.h
+ 	$(CC) dwl.c $(DWLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+ 
+ # wayland-scanner is a tool which generates C headers and rigging for Wayland
+diff --git a/btrtile.h b/btrtile.h
+new file mode 100644
+index 0000000..b202fcd
+--- /dev/null
++++ b/btrtile.h
+@@ -0,0 +1,884 @@
++/* ************************************************************************** */
++/*                                                 @@@            @@@@@@@@    */
++/*                                                  @@@          @@@@@@@@@@   */
++/*                                                   @@!         @@!   @@@@   */
++/*                                                    !@!        !@!  @!@!@   */
++/*   btrtile.h                                         @!!       @!@ @! !@!   */
++/*                                                      !!!      !@!!!  !!!   */
++/*   By: julmajustus <julmajustus@tutanota.com>          !!:     !!:!   !!!   */
++/*                                                        ::!    :!:    !:!   */
++/*   Created: 2024/12/15 00:26:07 by julmajustus           ::    ::::::: ::   */
++/*   Updated: 2026/09/21 21:20:08 by julmajustus            : :   : : :  :    */
++/*                                                                            */
++/* ************************************************************************** */
++
++typedef struct LayoutNode {
++	unsigned int is_client_node;
++	unsigned int is_split_vertically;
++	unsigned int keep_dir;
++	float split_ratio;
++	struct wlr_box box;
++	struct LayoutNode *left; /* left or top */
++	struct LayoutNode *right; /* right or bottom */
++	struct LayoutNode *split_node; /* parent */
++	Client *client;
++} LayoutNode;
++
++static void apply_boxes(Monitor *m, LayoutNode *node);
++static void apply_layout(Monitor *m, LayoutNode *node,
++						struct wlr_box area, unsigned int is_root);
++static void btrtile(Monitor *m);
++static int clamp_split(int total, int mid, int lmin, int rmin, int g);
++static LayoutNode *create_client_node(Client *c);
++static LayoutNode *create_split_node(unsigned int is_split_vertically,
++									LayoutNode *left, LayoutNode *right);
++static void destroy_node(LayoutNode *node);
++static void destroy_tree(Monitor *m);
++static LayoutNode *find_suitable_split(Monitor *m, LayoutNode *start,
++                                       unsigned int need_vertical, int focused_on_left);
++static int half_gap(Monitor *m);
++static int in_tree(Monitor *m, Client *c);
++static void init_tree(Monitor *m);
++static void insert_client(Monitor *m, Client *target, Client *new_client);
++static void layout_boxes(Monitor *m, LayoutNode *node,
++						struct wlr_box area, unsigned int is_root);
++static void layout_node(Monitor *m, LayoutNode *node,
++						struct wlr_box area, unsigned int is_root);
++static void node_min_size(Monitor *m, LayoutNode *node, int *w, int *h);
++static int outer_gap(Monitor *m);
++static void remove_client(Monitor *m, Client *c);
++static void remove_leaf(Monitor *m, Client *c);
++static void resize_split(unsigned int need_vertical, double delta, int in_pixels);
++static void resize_split_px(unsigned int need_vertical, double pixels);
++static void setratio_h(const Arg *arg);
++static void setratio_v(const Arg *arg);
++static Client *split_target(Monitor *m);
++static void swapclients(const Arg *arg);
++static void swapsplit(const Arg *arg);
++static void togglesplit(const Arg *arg);
++static LayoutNode *tree_root(LayoutNode *n);
++static void unlink_client(Client *c);
++static unsigned int visible_count(LayoutNode *node, Monitor *m);
++static LayoutNode *visible_parent(Monitor *m, LayoutNode *n);
++static int wants_vertical(int width, int height);
++static Client *xytoclient(double x, double y);
++
++static double resize_last_update_x, resize_last_update_y;
++static uint32_t last_resize_time = 0;
++static int dir_changed;
++
++/* give every visible client the box of its leaf */
++void
++apply_boxes(Monitor *m, LayoutNode *node)
++{
++	Client *c;
++
++	if (!node) {
++		return;
++    }
++
++	if (node->is_client_node) {
++		c = node->client;
++		if (c && VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen) {
++			resize(c, node->box, 0);
++        }
++
++		return;
++	}
++
++	apply_boxes(m, node->left);
++	apply_boxes(m, node->right);
++}
++
++void
++apply_layout(Monitor *m, LayoutNode *node,
++             struct wlr_box area, unsigned int is_root)
++{
++	layout_boxes(m, node, area, is_root);
++	apply_boxes(m, node);
++}
++
++void
++btrtile(Monitor *m)
++{
++	Client *c, *target;
++	int n = 0;
++
++	if (!m) {
++		return;
++    }
++
++	/* Remove floating and moved clients */
++	wl_list_for_each(c, &clients, link) {
++		if (c->mon != m || c->isfloating) {
++			remove_client(m, c);
++        }
++	}
++
++	layout_boxes(m, m->root, m->w, 1);
++
++	/* Insert visible clients that are not part of the tree */
++	target = split_target(m);
++	wl_list_for_each(c, &clients, link) {
++		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen) {
++			continue;
++        }
++
++		if (c->node && !in_tree(m, c)) {
++			unlink_client(c);
++        }
++
++		if (!c->node) {
++			insert_client(m, target, c);
++			layout_boxes(m, m->root, m->w, 1);
++			target = c;
++		}
++		n++;
++	}
++
++	if (n == 0) {
++		return;
++    }
++
++	apply_boxes(m, m->root);
++}
++
++/* Keep both sides of a split at least as large as min hint size */
++int
++clamp_split(int total, int mid, int lmin, int rmin, int g)
++{
++	int lo = lmin + g;
++    int hi = total - rmin - g;
++
++	if (lo <= hi) {
++		return MAX(lo, MIN(mid, hi));
++    }
++
++	if (lmin + rmin <= 0) {
++		return mid;
++    }
++
++	return (int)((double)total * lmin / (lmin + rmin));
++}
++
++LayoutNode *
++create_client_node(Client *c)
++{
++	LayoutNode *node = calloc(1, sizeof(LayoutNode));
++
++	if (!node) {
++		return NULL;
++    }
++
++	node->is_client_node = 1;
++	node->split_ratio = 0.5f;
++	node->client = c;
++	c->node = node;
++
++	return node;
++}
++
++LayoutNode *
++create_split_node(unsigned int is_split_vertically,
++				LayoutNode *left, LayoutNode *right)
++{
++	LayoutNode *node = calloc(1, sizeof(LayoutNode));
++
++	if (!node) {
++		return NULL;
++    }
++
++	node->is_client_node = 0;
++	node->split_ratio = 0.5f;
++	node->is_split_vertically = is_split_vertically;
++	node->left = left;
++	node->right = right;
++
++	if (left) {
++		left->split_node = node;
++    }
++
++	if (right) {
++		right->split_node = node;
++    }
++
++	return node;
++}
++
++void
++destroy_node(LayoutNode *node)
++{
++	if (!node) {
++		return;
++    }
++
++	if (node->is_client_node) {
++		if (node->client) {
++			node->client->node = NULL;
++        }
++	}
++    else {
++		destroy_node(node->left);
++		destroy_node(node->right);
++	}
++
++	free(node);
++}
++
++void
++destroy_tree(Monitor *m)
++{
++	if (!m || !m->root) {
++		return;
++    }
++
++	destroy_node(m->root);
++	m->root = NULL;
++}
++
++LayoutNode *
++find_suitable_split(Monitor *m, LayoutNode *start_node,
++		unsigned int need_vertical, int focused_on_left)
++{
++	LayoutNode *n = start_node, *child = NULL;
++
++	if (!m) {
++		return NULL;
++    }
++
++	if (n && n->is_client_node) {
++		child = n;
++		n = n->split_node;
++	}
++
++	while (n) {
++		if (!n->is_client_node && n->is_split_vertically == need_vertical
++				&& visible_count(n->left, m) > 0
++				&& visible_count(n->right, m) > 0) {
++			if ((focused_on_left && n->left == child) ||
++				(!focused_on_left && n->right == child))
++				return n;
++		}
++		child = n;
++		n = n->split_node;
++	}
++
++	return NULL;
++}
++
++#ifdef BTRTILE_GAPS
++int
++half_gap(Monitor *m)
++{
++	return m->gaps ? (int)gappx / 2 : 0;
++}
++#else
++int
++half_gap(Monitor *m)
++{
++	return 0;
++}
++#endif
++
++int
++in_tree(Monitor *m, Client *c)
++{
++	return m && m->root && c && c->node && tree_root(c->node) == m->root;
++}
++
++void
++init_tree(Monitor *m)
++{
++	if (m) {
++		m->root = NULL;
++    }
++}
++
++
++void
++insert_client(Monitor *m, Client *target, Client *new_client)
++{
++	LayoutNode *leaf, *tnode, *split, *parent;
++	struct wlr_box b;
++	int vertical, new_first;
++
++	if (new_client->node) {
++		unlink_client(new_client);
++    }
++
++	if (!(leaf = create_client_node(new_client))) {
++		return;
++    }
++
++	/* If no root, new client becomes the root. */
++	if (!m->root) {
++		m->root = leaf;
++		return;
++	}
++
++	if (!in_tree(m, target)) {
++		vertical = wants_vertical(m->w.width, m->w.height);
++		if (!(split = create_split_node(vertical, m->root, leaf))) {
++			goto fail;
++        }
++
++		m->root = split;
++		return;
++	}
++
++	tnode = target->node;
++	b = tnode->box;
++	vertical = wants_vertical(b.width, b.height);
++
++	/* Pick the side of the new client */
++	if (force_split == 1) {
++		new_first = 1;
++    }
++	else if (force_split == 2) {
++		new_first = 0;
++    }
++	else if (vertical) {
++		new_first = cursor->x <= b.x + b.width / 2.0;
++    }
++	else {
++		new_first = cursor->y <= b.y + b.height / 2.0;
++    }
++
++	parent = tnode->split_node;
++	split = new_first ? create_split_node(vertical, leaf, tnode)
++			: create_split_node(vertical, tnode, leaf);
++	if (!split) {
++		goto fail;
++    }
++
++	split->split_node = parent;
++	if (!parent) {
++		m->root = split;
++    }
++	else if (parent->left == tnode) {
++		parent->left = split;
++    }
++	else {
++		parent->right = split;
++    }
++
++	return;
++
++fail:
++	new_client->node = NULL;
++	free(leaf);
++}
++
++/* compute the box of every node */
++void
++layout_boxes(Monitor *m, LayoutNode *node, struct wlr_box area, unsigned int is_root)
++{
++	int i;
++
++	for (i = 0; i < 4; i++) {
++		dir_changed = 0;
++		layout_node(m, node, area, is_root);
++
++		if (!dir_changed) {
++			break;
++        }
++	}
++}
++
++void
++layout_node(Monitor *m, LayoutNode *node, struct wlr_box area, unsigned int is_root)
++{
++	unsigned int left_count, right_count;
++	int mid, lw, lh, rw, rh, vertical, og, g = half_gap(m);
++	float ratio;
++	struct wlr_box left_area, right_area;
++
++	if (!node) {
++		return;
++    }
++
++	if (is_root) {
++		og = outer_gap(m);
++		area.x += og;
++		area.y += og;
++		area.width -= 2 * og;
++		area.height -= 2 * og;
++	}
++	node->box = area;
++
++	if (node->is_client_node) {
++		return;
++    }
++
++	/* For a split node, see how many visible clients are on each side */
++	left_count = visible_count(node->left, m);
++	right_count = visible_count(node->right, m);
++	if (left_count == 0 && right_count == 0) {
++		return;
++    }
++
++	if (right_count == 0) {
++		layout_node(m, node->left, area, 0);
++		return;
++	}
++
++	if (left_count == 0) {
++		layout_node(m, node->right, area, 0);
++		return;
++	}
++
++	/* Visible clients on both sides */
++	if (!preserve_split && !node->keep_dir) {
++		vertical = wants_vertical(area.width, area.height);
++		if ((unsigned int)vertical != node->is_split_vertically) {
++			dir_changed = 1;
++        }
++		node->is_split_vertically = vertical;
++	}
++
++	ratio = node->split_ratio;
++	if (ratio < 0.05f) {
++		ratio = 0.05f;
++    }
++
++	if (ratio > 0.95f) {
++		ratio = 0.95f;
++    }
++
++	node_min_size(m, node->left, &lw, &lh);
++	node_min_size(m, node->right, &rw, &rh);
++	left_area = right_area = area;
++
++	if (node->is_split_vertically) {
++		mid = clamp_split(area.width, (int)(area.width * ratio), lw, rw, g);
++		left_area.width = mid - g;
++		right_area.x = area.x + mid + g;
++		right_area.width = area.width - mid - g;
++	} else {
++		mid = clamp_split(area.height, (int)(area.height * ratio), lh, rh, g);
++		left_area.height = mid - g;
++		right_area.y = area.y + mid + g;
++		right_area.height = area.height - mid - g;
++	}
++
++	layout_node(m, node->left, left_area, 0);
++	layout_node(m, node->right, right_area, 0);
++}
++
++/* Smallest size a subtree can be given without violating size hints */
++void
++node_min_size(Monitor *m, LayoutNode *node, int *w, int *h)
++{
++	Client *c;
++	struct wlr_box min = {0}, max = {0};
++	int lw, lh, rw, rh, g;
++
++	*w = *h = 0;
++	if (!node) {
++		return;
++    }
++
++	if (node->is_client_node) {
++		c = node->client;
++
++		if (!c || !VISIBLEON(c, m) || c->isfloating || c->isfullscreen) {
++			return;
++        }
++
++		client_get_size_hints(c, &max, &min);
++		*w = MAX(min.width, 1) + 2 * (int)c->bw;
++		*h = MAX(min.height, 1) + 2 * (int)c->bw;
++
++		return;
++	}
++
++	node_min_size(m, node->left, &lw, &lh);
++	node_min_size(m, node->right, &rw, &rh);
++	if (!lw) {
++		*w = rw;
++		*h = rh;
++		return;
++	}
++	if (!rw) {
++		*w = lw;
++		*h = lh;
++		return;
++	}
++
++	g = 2 * half_gap(m);
++	if (node->is_split_vertically) {
++		*w = lw + rw + g;
++		*h = MAX(lh, rh);
++	}
++    else {
++		*w = MAX(lw, rw);
++		*h = lh + rh + g;
++	}
++}
++
++#ifdef BTRTILE_GAPS
++int
++outer_gap(Monitor *m)
++{
++	return m->gaps ? (int)gappx : 0;
++}
++
++#else
++int
++outer_gap(Monitor *m)
++{
++	return 0;
++}
++#endif
++
++/* Remove c if in the tree */
++void
++remove_client(Monitor *m, Client *c)
++{
++	if (in_tree(m, c)) {
++		remove_leaf(m, c);
++    }
++}
++
++void
++remove_leaf(Monitor *m, Client *c)
++{
++	LayoutNode *n = c->node, *p, *sib, *gp;
++
++	if (!n) {
++		return;
++    }
++
++	c->node = NULL;
++
++	if (!(p = n->split_node)) {
++		m->root = NULL;
++		free(n);
++		return;
++	}
++
++	sib = (p->left == n) ? p->right : p->left;
++	gp = p->split_node;
++	sib->split_node = gp;
++	if (!gp) {
++		m->root = sib;
++    }
++	else if (gp->left == p) {
++		gp->left = sib;
++    }
++	else {
++		gp->right = sib;
++    }
++
++	free(n);
++	free(p);
++}
++
++/* In pixel mode delta is a pointer movement, otherwise it is a change of the split ratio. */
++void
++resize_split(unsigned int need_vertical, double delta, int in_pixels)
++{
++	Client *sel;
++	LayoutNode *split;
++	double extent, ratio;
++
++	if (!selmon || !selmon->lt[selmon->sellt]->arrange) {
++		return;
++    }
++
++	sel = focustop(selmon);
++	if (!in_tree(selmon, sel)) {
++		return;
++    }
++
++	if (in_pixels && delta == 0.0) {
++		return;
++    }
++
++	split = find_suitable_split(selmon, sel->node, need_vertical, delta >= 0.0);
++	if (!split) {
++		split = find_suitable_split(selmon, sel->node, need_vertical, delta < 0.0);
++    }
++
++	if (!split) {
++		return;
++    }
++
++	if (in_pixels) {
++		extent = need_vertical ? split->box.width : split->box.height;
++		if (extent <= 0.0) {
++			return;
++        }
++
++		delta /= extent;
++	}
++
++	ratio = (delta != 0.0) ? split->split_ratio + delta : 0.5;
++	ratio = MAX(0.05, MIN(ratio, 0.95));
++	split->split_ratio = (float)ratio;
++
++	apply_layout(selmon, selmon->root, selmon->w, 1);
++}
++
++void
++resize_split_px(unsigned int need_vertical, double pixels)
++{
++	resize_split(need_vertical, pixels, 1);
++}
++
++void
++setratio_h(const Arg *arg)
++{
++	resize_split(1, arg->f, 0);
++}
++
++void
++setratio_v(const Arg *arg)
++{
++	resize_split(0, arg->f, 0);
++}
++
++Client *
++split_target(Monitor *m)
++{
++	Client *c;
++
++	if (!use_active_for_splits && (c = xytoclient(cursor->x, cursor->y))
++			&& in_tree(m, c)) {
++		return c;
++    }
++
++	wl_list_for_each(c, &fstack, flink) {
++		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen && in_tree(m, c)) {
++			return c;
++        }
++	}
++
++	return NULL;
++}
++
++void
++swapclients(const Arg *arg)
++{
++	Client *c, *target = NULL, *sel = focustop(selmon);
++	LayoutNode *sel_node, *target_node;
++	int closest_dist = INT_MAX, dist, sel_center_x, sel_center_y,
++	cand_center_x, cand_center_y;
++
++	if (!sel || sel->isfullscreen || !in_tree(selmon, sel)
++			|| !selmon->lt[selmon->sellt]->arrange) {
++		return;
++    }
++
++	/* Get the center coordinates of the selected client */
++	sel_center_x = sel->geom.x + sel->geom.width / 2;
++	sel_center_y = sel->geom.y + sel->geom.height / 2;
++
++	wl_list_for_each(c, &clients, link) {
++		if (!VISIBLEON(c, selmon) || c->isfloating || c->isfullscreen || c == sel) {
++			continue;
++        }
++
++		/* Get the center of candidate client */
++		cand_center_x = c->geom.x + c->geom.width / 2;
++		cand_center_y = c->geom.y + c->geom.height / 2;
++
++		/* Check that the candidate lies in the requested direction. */
++		switch (arg->ui) {
++			case 0:
++				if (cand_center_x >= sel_center_x) {
++					continue;
++                }
++				break;
++			case 1:
++				if (cand_center_x <= sel_center_x) {
++					continue;
++                }
++				break;
++			case 2:
++				if (cand_center_y >= sel_center_y) {
++					continue;
++                }
++				break;
++			case 3:
++				if (cand_center_y <= sel_center_y) {
++					continue;
++                }
++				break;
++			default:
++				continue;
++		}
++
++		/* Get distance between the centers */
++		dist = abs(sel_center_x - cand_center_x) + abs(sel_center_y - cand_center_y);
++		if (dist < closest_dist) {
++			closest_dist = dist;
++			target = c;
++		}
++	}
++
++	/* If target is found, swap the two clients' leaves in the layout tree */
++	if (target && in_tree(selmon, target)) {
++		sel_node = sel->node;
++		target_node = target->node;
++		sel_node->client = target;
++		target_node->client = sel;
++		sel->node = target_node;
++		target->node = sel_node;
++		arrange(selmon);
++	}
++}
++
++/* Mirror the split */
++void
++swapsplit(const Arg *arg)
++{
++	Client *sel = focustop(selmon);
++	LayoutNode *p, *tmp;
++
++	if (!in_tree(selmon, sel) || !(p = visible_parent(selmon, sel->node))) {
++		return;
++    }
++
++	tmp = p->left;
++	p->left = p->right;
++	p->right = tmp;
++	p->split_ratio = 1.0f - p->split_ratio;
++	arrange(selmon);
++}
++
++/* Flip the split direction of the split node */
++void
++togglesplit(const Arg *arg)
++{
++	Client *sel = focustop(selmon);
++	LayoutNode *p;
++
++	if (!in_tree(selmon, sel) || !(p = visible_parent(selmon, sel->node))) {
++		return;
++    }
++
++	p->is_split_vertically = !p->is_split_vertically;
++	p->keep_dir = 1;
++	arrange(selmon);
++}
++
++LayoutNode *
++tree_root(LayoutNode *n)
++{
++	while (n && n->split_node) {
++		n = n->split_node;
++    }
++
++	return n;
++}
++
++/* Remove c */
++void
++unlink_client(Client *c)
++{
++	LayoutNode *root;
++	Monitor *m;
++
++	if (!c || !c->node) {
++		return;
++    }
++
++	root = tree_root(c->node);
++	wl_list_for_each(m, &mons, link) {
++		if (m->root == root) {
++			remove_leaf(m, c);
++			return;
++		}
++	}
++
++	c->node->client = NULL;
++	c->node = NULL;
++}
++
++unsigned int
++visible_count(LayoutNode *node, Monitor *m)
++{
++	Client *c;
++
++	if (!node) {
++		return 0;
++    }
++
++	/* Check if this client is visible. */
++	if (node->is_client_node) {
++		c = node->client;
++		if (c && VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen) {
++			return 1;
++        }
++
++		return 0;
++	}
++
++	/* Else it's a split node. */
++	return visible_count(node->left, m) + visible_count(node->right, m);
++}
++
++/* get nearest ancestor of node that splits visible clients on both sides */
++LayoutNode *
++visible_parent(Monitor *m, LayoutNode *n)
++{
++	for (n = n->split_node; n; n = n->split_node) {
++		if (visible_count(n->left, m) > 0 && visible_count(n->right, m) > 0) {
++			return n;
++        }
++	}
++
++	return NULL;
++}
++
++int
++wants_vertical(int width, int height)
++{
++	return (double)width >= (double)height * split_width_multiplier;
++}
++
++/* get tiled client under the point, or the closest one */
++Client *
++xytoclient(double x, double y) {
++	Monitor *m = xytomon(x, y);
++	Client *c, *closest = NULL;
++	double dist, mindist = INT_MAX, dx, dy;
++
++	wl_list_for_each_reverse(c, &clients, link) {
++		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen && c->node &&
++			x >= c->geom.x && x <= (c->geom.x + c->geom.width) &&
++			y >= c->geom.y && y <= (c->geom.y + c->geom.height)){
++			return c;
++		}
++	}
++
++	/* If no client was found at cursor position fallback to closest. */
++	wl_list_for_each_reverse(c, &clients, link) {
++		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen && c->node) {
++			dx = 0, dy = 0;
++
++			if (x < c->geom.x) {
++				dx = c->geom.x - x;
++            }
++			else if (x > (c->geom.x + c->geom.width)) {
++				dx = x - (c->geom.x + c->geom.width);
++            }
++
++			if (y < c->geom.y) {
++				dy = c->geom.y - y;
++            }
++			else if (y > (c->geom.y + c->geom.height)) {
++				dy = y - (c->geom.y + c->geom.height);
++            }
++
++			dist = dx * dx + dy * dy;
++			if (dist < mindist) {
++				mindist = dist;
++				closest = c;
++			}
++		}
++	}
++
++	return closest;
++}
+diff --git a/config.def.h b/config.def.h
+index 13c5322..061e6e4 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -14,7 +14,15 @@ static const float focuscolor[]            = COLOR(0x005577ff);
+ static const float urgentcolor[]           = COLOR(0xff0000ff);
+ /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
+ static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You can also use glsl colors */
+-
++/* btrtile */
++#define BTRTILE_GAPS
++static const int use_active_for_splits     = 1;    /* 0: split the client under the cursor */
++static const int force_split               = 0;    /* 0: new window on the cursor's side, 1: left/top, 2: right/bottom */
++static const int preserve_split            = 1;    /* 1: splits keep the direction they were created with */
++static const float split_width_multiplier  = 1.0f; /* side by side when width >= height * multiplier */
++static const uint32_t resize_interval_ms   = 16; /* Resize interval depends on framerate and screen refresh rate. */
++
++enum Direction { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN };
+ /* tagging - TAGCOUNT must be no greater than 31 */
+ #define TAGCOUNT (9)
+ 
+@@ -31,6 +39,7 @@ static const Rule rules[] = {
+ /* layout(s) */
+ static const Layout layouts[] = {
+ 	/* symbol     arrange function */
++	{ "|w|",      btrtile },
+ 	{ "[]=",      tile },
+ 	{ "><>",      NULL },    /* no layout function means floating behavior */
+ 	{ "[M]",      monocle },
+@@ -144,6 +153,16 @@ static const Key keys[] = {
+ 	{ MODKEY,                    XKB_KEY_period,      focusmon,         {.i = WLR_DIRECTION_RIGHT} },
+ 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_comma,       tagmon,           {.i = WLR_DIRECTION_LEFT} },
+ 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_period,      tagmon,           {.i = WLR_DIRECTION_RIGHT} },
++	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,          swapclients,      {.i = DIR_UP} },
++	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,        swapclients,      {.i = DIR_DOWN} },
++	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,       swapclients,      {.i = DIR_RIGHT} },
++	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Left,        swapclients,      {.i = DIR_LEFT} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,       setratio_h,       {.f = +0.025f} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,        setratio_h,       {.f = -0.025f} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,          setratio_v,       {.f = -0.025f} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,        setratio_v,       {.f = +0.025f} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_t,           togglesplit,      {0} },
++	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_y,           swapsplit,        {0} },
+ 	TAGKEYS(                     XKB_KEY_1,           0),
+ 	TAGKEYS(                     XKB_KEY_2,           1),
+ 	TAGKEYS(                     XKB_KEY_3,           2),
+diff --git a/dwl.c b/dwl.c
+index 4cfd0fd..8f59bef 100644
+--- a/dwl.c
++++ b/dwl.c
+@@ -1,6 +1,7 @@
+ /*
+  * See LICENSE file for copyright and license details.
+  */
++#include <limits.h>
+ #include <getopt.h>
+ #include <libinput.h>
+ #include <limits.h>
+@@ -113,6 +114,7 @@ typedef struct {
+ 	const Arg arg;
+ } Button;
+ 
++typedef struct LayoutNode LayoutNode;
+ typedef struct Monitor Monitor;
+ typedef struct {
+ 	/* Must keep this field first */
+@@ -158,7 +160,8 @@ typedef struct {
+ #endif
+ 	unsigned int bw;
+ 	uint32_t tags;
+-	int isfloating, isurgent, isfullscreen;
++	int isfloating, isurgent, isfullscreen, was_tiled;
++	LayoutNode *node;
+ } Client;
+ 
+ typedef struct {
+@@ -225,6 +228,7 @@ struct Monitor {
+ 	int nmaster;
+ 	char ltsymbol[16];
+ 	int asleep;
++	LayoutNode *root;
+ };
+ 
+ typedef struct {
+@@ -267,6 +271,7 @@ static void arrangelayer(Monitor *m, struct wl_list *list,
+ 		struct wlr_box *usable_area, int exclusive);
+ static void arrangelayers(Monitor *m);
+ static void axisnotify(struct wl_listener *listener, void *data);
++static void btrtile(Monitor *m);
+ static void buttonpress(struct wl_listener *listener, void *data);
+ static void capturerequest(struct wl_listener *listener, void *data);
+ static void chvt(const Arg *arg);
+@@ -350,6 +355,10 @@ static void setmon(Client *c, Monitor *m, uint32_t newtags);
+ static void setpsel(struct wl_listener *listener, void *data);
+ static void setsel(struct wl_listener *listener, void *data);
+ static void setup(void);
++static void setratio_h(const Arg *arg);
++static void setratio_v(const Arg *arg);
++static void swapclients(const Arg *arg);
++static void swapsplit(const Arg *arg);
+ static void spawn(const Arg *arg);
+ static void startdrag(struct wl_listener *listener, void *data);
+ static void tag(const Arg *arg);
+@@ -357,6 +366,7 @@ static void tagmon(const Arg *arg);
+ static void tile(Monitor *m);
+ static void togglefloating(const Arg *arg);
+ static void togglefullscreen(const Arg *arg);
++static void togglesplit(const Arg *arg);
+ static void toggletag(const Arg *arg);
+ static void toggleview(const Arg *arg);
+ static void unlocksession(struct wl_listener *listener, void *data);
+@@ -481,6 +491,7 @@ static struct wlr_xwayland *xwayland;
+ 
+ /* attempt to encapsulate suck into one file */
+ #include "client.h"
++#include "btrtile.h"
+ 
+ #include "ime.h"
+ 
+@@ -724,6 +735,17 @@ buttonpress(struct wl_listener *listener, void *data)
+ 	case WL_POINTER_BUTTON_STATE_RELEASED:
+ 		/* If you released any buttons, we exit interactive move/resize mode. */
+ 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
++			/* btrtile */
++			c = grabc;
++			if (c && c->was_tiled && !strcmp(selmon->ltsymbol, "|w|")) {
++				if (cursor_mode == CurMove && c->isfloating) {
++					setmon(c, selmon, 0);
++					insert_client(selmon, xytoclient(cursor->x, cursor->y), c);
++					setfloating(c, 0);
++					apply_layout(selmon, selmon->root, selmon->w, 1);
++				}
++			}
++			/* Default behaviour */
+ 			cursor_mode = CurNormal;
+ 			/* Update the cursor */
+ 			wlr_seat_pointer_clear_focus(seat);
+@@ -840,6 +862,8 @@ cleanupmon(struct wl_listener *listener, void *data)
+ 	wlr_scene_output_destroy(m->scene_output);
+ 
+ 	closemon(m);
++	/* btrtile */
++	destroy_tree(m);
+ 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
+ 	free(m);
+ }
+@@ -1188,6 +1212,8 @@ createmon(struct wl_listener *listener, void *data)
+ 
+ 	wl_list_insert(&mons, &m->link);
+ 	printstatus();
++	/* btrtile */
++	init_tree(m);
+ 
+ 	/* The xdg-protocol specifies:
+ 	 *
+@@ -1431,6 +1457,10 @@ destroynotify(struct wl_listener *listener, void *data)
+ 	wl_list_remove(&c->destroy.link);
+ 	wl_list_remove(&c->set_title.link);
+ 	wl_list_remove(&c->fullscreen.link);
++
++	// btrtile remove clients for each monitor
++	unlink_client(c);
++
+ #ifdef XWAYLAND
+ 	if (c->type != XDGShell) {
+ 		wl_list_remove(&c->activate.link);
+@@ -2002,8 +2032,9 @@ void
+ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
+ 		double dx_unaccel, double dy_unaccel)
+ {
++	int tiled = 0;
+ 	int nx, ny;
+-	double sx = 0, sy = 0, sx_confined, sy_confined;
++	double sx = 0, sy = 0, sx_confined, sy_confined, dx_total, dy_total;
+ 	Client *c = NULL, *w = NULL;
+ 	LayerSurface *l = NULL, *focusedl = NULL;
+ 	struct wlr_surface *surface = NULL;
+@@ -2057,28 +2088,55 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+ 	/* Update drag icon's position */
+ 	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
+ 
++	/* Skip if internal call */
++	if (time == 0)
++		goto focus;
++
++	tiled = grabc && !grabc->isfloating && !grabc->isfullscreen;
+ 	/* If we are currently grabbing the mouse, handle and return */
+ 	if (cursor_mode == CurMove) {
+ 		/* Move the grabbed client to the new position. */
+-		nx = (int)round(cursor->x) - grabcx;
+-		ny = (int)round(cursor->y) - grabcy;
+-		if (abs(selmon->w.x - nx) < (int)snap)
+-			nx = selmon->w.x;
+-		else if (abs((selmon->w.x + selmon->w.width) - (nx + grabc->geom.width)) < (int)snap)
+-			nx = selmon->w.x + selmon->w.width - grabc->geom.width;
+-		if (abs(selmon->w.y - ny) < (int)snap)
+-			ny = selmon->w.y;
+-		else if (abs((selmon->w.y + selmon->w.height) - (ny + grabc->geom.height)) < (int)snap)
+-			ny = selmon->w.y + selmon->w.height - grabc->geom.height;
+-		resize(grabc, (struct wlr_box){.x = nx, .y = ny,
+-			.width = grabc->geom.width, .height = grabc->geom.height}, 1);
+-		return;
++		if (grabc && grabc->isfloating) {
++			nx = (int)round(cursor->x) - grabcx;
++			ny = (int)round(cursor->y) - grabcy;
++			if (abs(selmon->w.x - nx) < (int)snap)
++				nx = selmon->w.x;
++			else if (abs((selmon->w.x + selmon->w.width) - (nx + grabc->geom.width)) < (int)snap)
++				nx = selmon->w.x + selmon->w.width - grabc->geom.width;
++			if (abs(selmon->w.y - ny) < (int)snap)
++				ny = selmon->w.y;
++			else if (abs((selmon->w.y + selmon->w.height) - (ny + grabc->geom.height)) < (int)snap)
++				ny = selmon->w.y + selmon->w.height - grabc->geom.height;
++			resize(grabc, (struct wlr_box){.x = nx, .y = ny,
++					.width = grabc->geom.width, .height = grabc->geom.height}, 1);
++			return;
++		}
+ 	} else if (cursor_mode == CurResize) {
+-		resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
+-			.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
+-		return;
+-	}
++		/* btrtile */
++		if (tiled) {
++			dx_total = cursor->x - resize_last_update_x;
++			dy_total = cursor->y - resize_last_update_y;
++
++			if (time - last_resize_time >= resize_interval_ms) {
++				if (fabs(dx_total) > fabs(dy_total))
++					resize_split_px(1, dx_total);
++				else
++					resize_split_px(0, dy_total);
++
++				last_resize_time = time;
++				resize_last_update_x = cursor->x;
++				resize_last_update_y = cursor->y;
++			}
++
++		} else if (grabc && grabc->isfloating) {
++			/* Floating resize as original */
++			resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
++				.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
++			return;
++		}
++    }
+ 
++focus:
+ 	/* If there's no client surface under the cursor, set the cursor image to a
+ 	 * default. This is what makes the cursor image appear when you move it
+ 	 * off of a client or over its border. */
+@@ -2112,22 +2170,40 @@ moveresize(const Arg *arg)
+ 	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
+ 		return;
+ 
+-	/* Float the window and tell motionnotify to grab it */
+-	setfloating(grabc, 1);
+-	switch (cursor_mode = arg->ui) {
+-	case CurMove:
+-		grabcx = (int)round(cursor->x) - grabc->geom.x;
+-		grabcy = (int)round(cursor->y) - grabc->geom.y;
+-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
+-		break;
+-	case CurResize:
+-		/* Doesn't work for X11 output - the next absolute motion event
+-		 * returns the cursor to where it started */
+-		wlr_cursor_warp_closest(cursor, NULL,
+-				grabc->geom.x + grabc->geom.width,
+-				grabc->geom.y + grabc->geom.height);
+-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
+-		break;
++	cursor_mode = arg->ui;
++	grabc->was_tiled = (!grabc->isfloating && !grabc->isfullscreen);
++
++	if (grabc->was_tiled) {
++		switch (cursor_mode) {
++		case CurMove:
++			setfloating(grabc, 1);
++			grabcx = (int)round(cursor->x) - grabc->geom.x;
++			grabcy = (int)round(cursor->y) - grabc->geom.y;
++			wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
++			break;
++		case CurResize:
++			wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
++			resize_last_update_x = cursor->x;
++			resize_last_update_y = cursor->y;
++			break;
++		}
++	} else {
++		/* Default floating logic */
++		/* Float the window and tell motionnotify to grab it */
++		setfloating(grabc, 1);
++		switch (cursor_mode) {
++		case CurMove:
++			grabcx = (int)round(cursor->x) - grabc->geom.x;
++			grabcy = (int)round(cursor->y) - grabc->geom.y;
++			wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
++			break;
++		case CurResize:
++			wlr_cursor_warp_closest(cursor, NULL,
++			grabc->geom.x + grabc->geom.width,
++			grabc->geom.y + grabc->geom.height);
++			wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
++			break;
++		}
+ 	}
+ }
+ 
+@@ -2998,6 +3074,9 @@ unmapnotify(struct wl_listener *listener, void *data)
+ 			focusclient(focustop(selmon), 1);
+ 		}
+ 	} else {
++		// btrtile remove clients for each monitor
++		unlink_client(c);
++
+ 		wl_list_remove(&c->link);
+ 		setmon(c, NULL, 0);
+ 		wl_list_remove(&c->flink);
+-- 
+2.55.0
+
